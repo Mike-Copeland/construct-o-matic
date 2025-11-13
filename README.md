@@ -1,4 +1,5 @@
-# PDF Plan Set Geolocation Tool (🤖 Construct-o-matic 🤖)
+# PDF Plan Set Geolocation Tool 
+# (🤖 Construct-o-matic 🤖)
 
 This repository contains a Python-based workflow for extracting and geolocating project features from construction plan set PDFs. The primary function is to convert project-level station and offset data into geographic coordinates (latitude/longitude), making legacy and ongoing project data compatible with asset management and GIS platforms.
 
