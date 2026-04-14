@@ -37,126 +37,232 @@ CATEGORIES = {
 # --- Extraction Configurations ---
 # Each config has 'match_keywords' for fuzzy matching against sheet titles from the inventory.
 # A config matches if ANY keyword appears (case-insensitive) in ANY sheet title.
+#
+# ITD Plan Set Structure Reference:
+#   Plan sheets show a PLAN VIEW (top) and PROFILE VIEW (bottom).
+#   The plan view is a scaled drawing with station tick marks along the centerline.
+#   Features are drawn at their physical location with callout labels showing item codes.
+#   Station+offset can be read from the drawing by referencing the station tick marks.
+#   Summary/detail sheets use ITD standard spec numbering:
+#     1xx=General, 2xx=Earthwork/Erosion, 3xx=Base, 4xx=Surfacing,
+#     5xx=Structures, 6xx=Roadside (60x=Drainage, 61x=Signing, 63x=Markings)
+
 FEATURE_SCHEMA_BLOCK = (
-    'Return a JSON array where each object has EXACTLY these keys:\n'
-    '{"name":"<item code>","description":"<description>","category":"<category>",'
+    'Return a JSON array. Each object MUST have these keys:\n'
+    '{"name":"<item code>","description":"<description>","category":"<see below>",'
     '"geometry_type":"<point or line>","start_station":"<e.g. 116+20>",'
     '"end_station":"<end station or null>","offset":"<e.g. 35\' Lt.>",'
     '"side":"<Lt or Rt or CL>","notes":"<additional info>"}\n'
 )
 
+PLAN_VIEW_CONTEXT = (
+    "\n\nHOW TO READ THESE SHEETS:\n"
+    "These are civil engineering plan sheets. The PLAN VIEW is a scaled aerial/top-down drawing. "
+    "Station tick marks are shown along the centerline at regular intervals (typically every 100 feet, "
+    "formatted as e.g. 125+00, 126+00). Features are drawn at their physical location on the plan view. "
+    "To determine a feature's station: find the nearest station tick marks on the centerline and "
+    "interpolate. To determine offset: estimate the perpendicular distance from centerline, noting "
+    "whether the feature is left (Lt) or right (Rt) of centerline when looking ahead (in the direction "
+    "of increasing stations). Read callout labels, leader lines, and annotations for item codes and "
+    "descriptions. Extract data from BOTH the drawings AND any tables on the sheets.\n"
+)
+
 EXTRACTION_CONFIGS = [
     {
         "name": "Roadway Summary",
-        "match_keywords": ["roadway summary"],
+        "match_keywords": ["roadway summary", "summary of quantities"],
         "prompt": (
-            "From the ROADWAY SUMMARY sheets, extract ALL pay items with station ranges. "
-            "These tables list every construction item, its quantity, and where it applies.\n\n"
-            "Include: excavation, embankment, aggregate base, HMA paving, seeding, "
-            "removal items, fencing, guardrail, concrete items, and all other listed items.\n\n"
-            "For items with a station range (e.g. Sta 116+21 to 256+15), set geometry_type to 'line'.\n"
-            "For items at a single location, set geometry_type to 'point'.\n"
+            "From the ROADWAY SUMMARY / SUMMARY OF QUANTITIES sheets, extract ALL pay items that have "
+            "station references. These tabular sheets list construction items with quantities.\n\n"
+            "ONLY extract items that have a specific station or station range listed in the table. "
+            "Skip lump-sum items that have no station reference — they cannot be geolocated.\n\n"
+            "For items with a station range (e.g. Sta 125+00 to 283+48), set geometry_type to 'line'.\n"
+            "For items at a single station, set geometry_type to 'point'.\n"
             "Set category to the best fit: curb_gutter, sidewalk, guardrail, drainage, "
             "pavement_marking, erosion_control, signing, approach, roadway_surface, or other.\n\n"
-            + FEATURE_SCHEMA_BLOCK +
-            "Extract EVERY line item. Do not skip any."
+            + FEATURE_SCHEMA_BLOCK
         ),
     },
     {
         "name": "Pipe & Culvert Summary",
         "match_keywords": ["pipe", "culvert"],
         "prompt": (
-            "From the PIPE CULVERT SUMMARY or PIPE SUMMARY sheets, extract ALL pipes and culverts.\n\n"
-            "Each pipe/culvert has a station, size, length, material, and type. "
-            "These are POINT features at their station location.\n\n"
+            "From the PIPE CULVERT SUMMARY or PIPE SUMMARY table, extract ALL pipes and culverts.\n\n"
+            "These tables list each pipe/culvert with its station, size, length, material, and type. "
+            "Each pipe is a POINT feature at its centerline station. "
+            "Cross-reference the plan sheets if a pipe's station or offset is ambiguous.\n\n"
             "Set category to 'drainage' for all items.\n\n"
             + FEATURE_SCHEMA_BLOCK +
-            "Include pipe size, material, and length in the notes field."
+            "Include pipe diameter, material, length, and slope in the notes field."
         ),
     },
     {
         "name": "Plan & Profile Features",
         "match_keywords": ["plan & profile", "plan sheet", "plan/profile", "plan/ profile"],
         "prompt": (
-            "From the PLAN & PROFILE sheets, extract ALL roadside features "
-            "referenced to mainline alignment stationing. Include curb & gutter, sidewalk, guardrail, "
-            "barrier, approaches (driveways), retaining walls, and any other constructed features.\n\n"
-            "CRITICAL: For LINEAR features (curb & gutter, sidewalk, guardrail, barrier), "
-            "provide BOTH start_station AND end_station.\n"
-            "Approaches/driveways are POINT features.\n"
-            "Set category to: curb_gutter, sidewalk, guardrail, approach, or other.\n\n"
+            "From the PLAN & PROFILE sheets, extract ALL constructed features shown in the PLAN VIEW drawings. "
+            "The plan view is the top portion of each sheet — a scaled top-down drawing of the road.\n\n"
+            "Read the drawings carefully. Features include:\n"
+            "- Curb & gutter runs (drawn as lines along the road edge)\n"
+            "- Sidewalk (drawn parallel to curb)\n"
+            "- Guardrail / barrier (drawn with standard symbols)\n"
+            "- Approaches / driveways (connections to adjacent properties)\n"
+            "- Retaining walls, headwalls, end sections\n"
+            "- Fence lines (drawn with X-pattern or specific line type)\n"
+            "- Ditches and channels (drawn with standard symbols)\n"
+            "- Any feature with an item code callout (e.g. 405-245A, 615-493A)\n\n"
+            "DETERMINE STATION by reading the station tick marks along the centerline "
+            "(marked at 100-ft intervals, e.g. 125+00, 126+00). Interpolate between tick marks.\n"
+            "DETERMINE OFFSET by estimating the perpendicular distance from centerline.\n\n"
+            "LINEAR features (curb, sidewalk, guardrail, fence, ditch) MUST have both "
+            "start_station and end_station.\n"
+            "POINT features (approaches, isolated structures) need only start_station.\n\n"
+            "Set category to: curb_gutter, sidewalk, guardrail, approach, drainage, or other.\n\n"
             + FEATURE_SCHEMA_BLOCK +
-            "Extract EVERY feature shown. Do not skip any."
+            PLAN_VIEW_CONTEXT +
+            "Extract EVERY visible feature. Do not skip any."
         ),
     },
     {
         "name": "Drainage Features",
         "match_keywords": ["drainage"],
         "prompt": (
-            "From the DRAINAGE plan sheets, extract ALL drainage structures and features.\n\n"
-            "Include: inlets, manholes, catch basins, pipe runs, ponds, swales, ditches, culverts, headwalls.\n"
-            "Structures (inlets, manholes) = POINT. Pipe runs/swales/ditches = LINE with start/end station.\n"
+            "From the DRAINAGE plan sheets, extract ALL drainage structures and features. "
+            "These sheets show drainage infrastructure in plan view with callout labels.\n\n"
+            "Read BOTH the plan view drawings AND any drainage structure tables/schedules.\n\n"
+            "Features to extract:\n"
+            "- Inlets (all types) — POINT at their station, with offset\n"
+            "- Manholes — POINT\n"
+            "- Catch basins — POINT\n"
+            "- Pipe runs between structures — LINE from upstream to downstream station\n"
+            "- Swales and ditches — LINE with start/end station\n"
+            "- Retention/detention ponds — POINT at center\n"
+            "- Culverts and cross drains — POINT at centerline station\n"
+            "- Headwalls and end sections — POINT\n"
+            "- Outfall structures — POINT\n\n"
             "Set category to 'drainage'.\n\n"
             + FEATURE_SCHEMA_BLOCK +
-            "Include pipe size, material, and connected structures in notes."
+            PLAN_VIEW_CONTEXT +
+            "Include pipe size, material, slope, and connected structure IDs in notes."
         ),
     },
     {
         "name": "Signing Features",
         "match_keywords": ["sign"],
         "prompt": (
-            "From the SIGNING sheets, Sign Summary table, and Sign & Pavement Marking Plan sheets, "
-            "extract ALL signs referenced to mainline alignment stationing.\n\n"
-            "Each sign is a POINT feature. Include MUTCD code if shown.\n"
+            "Extract ALL signs from this plan set. Look in MULTIPLE locations:\n\n"
+            "1. SIGN SUMMARY TABLE — lists sign types, MUTCD codes, and quantities. "
+            "This table may or may not include station references.\n"
+            "2. SIGN & PAVEMENT MARKING PLAN sheets — plan view drawings showing each sign's "
+            "physical location along the road with station tick marks on the centerline.\n"
+            "3. PLAN & PROFILE sheets — may show signs with callout labels.\n\n"
+            "For signs in the summary table WITHOUT stations: look at the plan view sheets to find "
+            "where that sign type appears and read the station from the drawing.\n\n"
+            "Each sign is a POINT feature. Signs are typically offset 6-12 feet from the edge of "
+            "the travel lane. Note the side (Lt/Rt) based on which side of the road the sign is drawn.\n\n"
             "Set category to 'signing'.\n\n"
             + FEATURE_SCHEMA_BLOCK +
-            "Include facing direction, mounting type, new/existing/remove in notes."
+            PLAN_VIEW_CONTEXT +
+            "Include MUTCD code, sign legend/message, facing direction, "
+            "and new/existing/relocate/remove status in notes."
         ),
     },
     {
         "name": "Pavement Marking Features",
         "match_keywords": ["pavement mark", "striping", "marking plan"],
         "prompt": (
-            "From the PAVEMENT MARKING / STRIPING sheets, extract ALL pavement markings.\n\n"
-            "Striping lines (center line, edge line, lane line) = LINE with start/end station.\n"
-            "Symbols (arrows, crosswalks, stop bars) = POINT.\n"
+            "From the PAVEMENT MARKING, STRIPING, and SIGN & PAVEMENT MARKING PLAN sheets, "
+            "extract ALL pavement markings shown in the plan view drawings.\n\n"
+            "These sheets show markings drawn on the road surface with labels and callouts.\n\n"
+            "Features to extract:\n"
+            "- Center line striping — LINE from start to end station, offset = 0' CL\n"
+            "- Edge lines (white solid) — LINE, offset = half the road width Lt and Rt\n"
+            "- Lane lines — LINE between travel lanes\n"
+            "- Skip lines / broken lines — LINE with pattern noted\n"
+            "- Turn arrows — POINT at their station\n"
+            "- ONLY/STOP/YIELD word markings — POINT\n"
+            "- Crosswalk markings — POINT or LINE\n"
+            "- Stop bars — POINT\n"
+            "- Railroad crossing markings — POINT\n\n"
+            "DETERMINE STATION from the station tick marks on the centerline.\n"
             "Set category to 'pavement_marking'.\n\n"
             + FEATURE_SCHEMA_BLOCK +
-            "Include color, width, pattern (solid/skip/broken) in notes."
+            PLAN_VIEW_CONTEXT +
+            "Include color (white/yellow), width (4\"/6\"/8\"/12\"/24\"), "
+            "and pattern (solid/skip/broken/dotted) in notes."
         ),
     },
     {
         "name": "Erosion Control Features",
-        "match_keywords": ["erosion", "swppp"],
+        "match_keywords": ["erosion", "swppp", "212-", "bmp"],
         "prompt": (
-            "From the EROSION CONTROL / SWPPP sheets, extract ALL erosion control features.\n\n"
-            "Silt fence, wattles, erosion blanket = LINE with start/end station.\n"
-            "Inlet protection, check dams, sediment traps, construction entrances = POINT.\n"
+            "From the EROSION CONTROL, SWPPP, and BMP sheets (including ITD standard detail sheets "
+            "numbered 212-xxx), extract ALL erosion control / stormwater BMPs.\n\n"
+            "Also check the PLAN & PROFILE sheets for erosion control items drawn in the plan view "
+            "(silt fence is often drawn as a dashed line with X marks, inlet protection shown at inlets).\n\n"
+            "Features to extract:\n"
+            "- Silt fence — LINE with start/end station, typically at construction limits\n"
+            "- Inlet protection — POINT at each protected inlet\n"
+            "- Erosion blanket / erosion mat — LINE over the covered area\n"
+            "- Wattles / fiber rolls — LINE along contours\n"
+            "- Seeding/mulching areas — LINE with start/end station if station range given\n"
+            "- Check dams — POINT in ditches\n"
+            "- Sediment traps/basins — POINT\n"
+            "- Construction entrances — POINT\n"
+            "- Concrete washout areas — POINT\n\n"
             "Set category to 'erosion_control'.\n\n"
-            + FEATURE_SCHEMA_BLOCK
+            + FEATURE_SCHEMA_BLOCK +
+            PLAN_VIEW_CONTEXT
         ),
     },
     {
         "name": "Traffic Control Features",
-        "match_keywords": ["traffic control", "traffic plan"],
+        "match_keywords": ["traffic control", "traffic plan", "tcp"],
         "prompt": (
-            "From the TRAFFIC CONTROL / TRAFFIC PLAN sheets, extract ALL temporary traffic control features.\n\n"
-            "Include: temporary signs, barricades, flagging stations, temporary striping, arrow boards.\n"
-            "Most are POINT features unless they define a zone (LINE).\n"
+            "From the TEMPORARY TRAFFIC CONTROL PLAN (TCP) sheets, extract ALL traffic control devices "
+            "shown in the plan view drawings.\n\n"
+            "TCP sheets are plan view drawings showing temporary signing, lane closures, "
+            "and work zone layouts. They use the same station tick marks as the plan sheets.\n\n"
+            "READ THE PLAN VIEW DRAWING to determine each device's station and offset. "
+            "Do NOT rely solely on tables — the device locations are shown graphically.\n\n"
+            "Features to extract:\n"
+            "- Temporary signs (shown with MUTCD codes like W20-1, G20-1) — POINT\n"
+            "- Advance warning signs — POINT at their drawn location\n"
+            "- Channelizing devices / barricades — POINT or LINE if defining a taper\n"
+            "- Arrow boards — POINT\n"
+            "- Flagging stations — POINT where the flagger symbol is drawn\n"
+            "- Temporary striping — LINE\n"
+            "- Work zone limits — LINE from start to end station\n"
+            "- Pilot car turnouts — POINT\n\n"
+            "IMPORTANT: TCP plans often show multiple PHASES. Extract devices from ALL phases. "
+            "Note which phase each device belongs to in the notes field.\n\n"
             "Set category to 'traffic_control'.\n\n"
-            + FEATURE_SCHEMA_BLOCK
+            + FEATURE_SCHEMA_BLOCK +
+            PLAN_VIEW_CONTEXT +
+            "Include the TCP phase number and device type in notes."
         ),
     },
     {
         "name": "Utility Features",
         "match_keywords": ["utility"],
         "prompt": (
-            "From the UTILITY PLANS sheets, extract ALL utility features referenced to mainline stationing.\n\n"
-            "Include: utility relocations, crossings, poles, vaults, manholes, conduit runs.\n"
-            "Individual structures = POINT. Conduit/pipe runs = LINE with start/end station.\n"
+            "From the UTILITY PLANS sheets, extract ALL utility features shown in the plan view.\n\n"
+            "These sheets show existing and proposed utility lines, poles, and structures "
+            "drawn over the road plan view with station tick marks.\n\n"
+            "Features to extract:\n"
+            "- Utility poles (power, telecom) — POINT with station and offset\n"
+            "- Underground utility crossings — POINT at centerline station\n"
+            "- Utility relocations — LINE from old to new location, or POINT if single structure\n"
+            "- Manholes / vaults / junction boxes — POINT\n"
+            "- Conduit runs — LINE with start/end station\n"
+            "- Overhead lines — LINE if station range is clear\n"
+            "- Fire hydrants — POINT\n"
+            "- Irrigation structures — POINT\n\n"
             "Set category to 'utility'.\n\n"
             + FEATURE_SCHEMA_BLOCK +
-            "Include utility owner/type (electric, gas, water, telecom) in notes."
+            PLAN_VIEW_CONTEXT +
+            "Include utility owner (power company, telco, irrigation district, city) "
+            "and type (electric, gas, water, telecom, irrigation, fiber) in notes."
         ),
     },
 ]
@@ -658,12 +764,19 @@ def phase4_inventory_sheets(pdf_path: str) -> List[Dict]:
 # --- Phase 5: Category-Specific Feature Extraction (Parallel) ---
 
 def _config_matches_inventory(config: dict, sheet_inventory: List[Dict]) -> bool:
-    """Check if any keyword in the config matches any sheet title in the inventory (case-insensitive)."""
-    all_titles = ' '.join(
-        s.get('sheet_type', '') + ' ' + s.get('title', '') + ' ' + s.get('description', '')
-        for s in sheet_inventory
-    ).lower()
-    return any(kw.lower() in all_titles for kw in config['match_keywords'])
+    """Check if any keyword in the config matches any field in the inventory (case-insensitive).
+    Searches sheet_type, title, description, AND sheet_numbers."""
+    parts = []
+    for s in sheet_inventory:
+        parts.append(s.get('sheet_type', ''))
+        parts.append(s.get('title', ''))
+        parts.append(s.get('description', ''))
+        # Include sheet numbers — catches ITD spec references like "212-15" for erosion
+        nums = s.get('sheet_numbers', [])
+        if isinstance(nums, list):
+            parts.extend(str(n) for n in nums)
+    all_text = ' '.join(parts).lower()
+    return any(kw.lower() in all_text for kw in config['match_keywords'])
 
 def _extract_one_config(pdf_path: str, config: dict) -> Tuple[str, List[Dict]]:
     """Extract features for a single config. Returns (config_name, features_list)."""
