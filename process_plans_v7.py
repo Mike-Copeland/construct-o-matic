@@ -529,6 +529,67 @@ def phase3_generate_centerline(pdf_path: str, metadata: Dict[str, Any]) -> Tuple
 
     print(f"  > Converted {processed_count} control points to WGS84.")
 
+    # Step 3.2b: Outlier detection — remove points with coordinates far from the median
+    print("  > Step 3.2b: Checking for coordinate outliers...")
+    point_features = [f for f in ground_geojson['features']
+                      if f.get('geometry', {}).get('type') == 'Point']
+    if len(point_features) >= 3:
+        lats = [f['geometry']['coordinates'][1] for f in point_features]
+        lons = [f['geometry']['coordinates'][0] for f in point_features]
+        median_lat = sorted(lats)[len(lats) // 2]
+        median_lon = sorted(lons)[len(lons) // 2]
+        # Allow max 0.15 degrees (~10 miles) from median — generous for any highway project
+        max_deviation = 0.15
+        clean_features = []
+        dropped = 0
+        for f in ground_geojson['features']:
+            if f.get('geometry', {}).get('type') != 'Point':
+                clean_features.append(f)
+                continue
+            lat = f['geometry']['coordinates'][1]
+            lon = f['geometry']['coordinates'][0]
+            if abs(lat - median_lat) > max_deviation or abs(lon - median_lon) > max_deviation:
+                props = f.get('properties', {})
+                print(f"    - DROPPED outlier: station={props.get('station', '?')}, "
+                      f"lat={lat:.4f}, lon={lon:.4f} "
+                      f"(median: {median_lat:.4f}, {median_lon:.4f})")
+                dropped += 1
+            else:
+                clean_features.append(f)
+        if dropped:
+            ground_geojson['features'] = clean_features
+            print(f"    Removed {dropped} outlier point(s).")
+        else:
+            print("    No outliers detected.")
+
+    # Step 3.2c: Deduplicate station equation points
+    # If station equations exist, points may appear under both numbering systems.
+    # Keep only points within the project station range, drop the "back" numbering duplicates.
+    station_equations = metadata.get('station_equations', [])
+    if station_equations:
+        print("  > Step 3.2c: Deduplicating station equation points...")
+        begin_sta = parse_station_string(metadata.get('begin_station'))
+        end_sta = parse_station_string(metadata.get('end_station'))
+        if begin_sta is not None and end_sta is not None:
+            before_count = len([f for f in ground_geojson['features']
+                               if f.get('geometry', {}).get('type') == 'Point'])
+            deduped_features = []
+            for f in ground_geojson['features']:
+                if f.get('geometry', {}).get('type') != 'Point':
+                    deduped_features.append(f)
+                    continue
+                sta = parse_station_value_from_props(f.get('properties', {}))
+                if sta is not None and (sta < begin_sta - 500 or sta > end_sta + 500):
+                    # This point's station is far outside project range — likely back-station numbering
+                    print(f"    - Dropped back-station point: sta={sta:.2f} "
+                          f"(project range: {begin_sta:.0f}-{end_sta:.0f})")
+                else:
+                    deduped_features.append(f)
+            ground_geojson['features'] = deduped_features
+            after_count = len([f for f in ground_geojson['features']
+                              if f.get('geometry', {}).get('type') == 'Point'])
+            print(f"    Kept {after_count} of {before_count} points.")
+
     # Build the sorted centerline data structure
     sorted_centerline = prepare_centerline_data(ground_geojson)
 
