@@ -126,21 +126,28 @@ Validate by opening the KMZ in Google Earth Pro or dragging the GeoJSON into [ge
 
 ## Test Results
 
-Tested against 3 ITD plan sets:
+Tested against ITD plan set 22217 (SH-77, Nibbs Cr to Rice Cr, 160 stations):
 
-| Plan Set | Sheets | Features Extracted | Points | Lines | Skipped |
-|---|---|---|---|---|---|
-| 22217 (SH-77, 160 sta) | 25 + 18 survey | 304 raw → 242 output | 165 | 77 | 62 |
+| Metric | Value |
+|---|---|
+| Raw features extracted | 301 |
+| Output features (geolocated) | 265 |
+| Points | 212 |
+| LineStrings | 53 |
+| Skipped (no station reference) | 36 |
 
-Features by category (22217):
-- Drainage: 75 points + 37 lines (inlets, manholes, pipe runs)
-- Roadway Surface: 16 lines (paving, aggregate base with station ranges)
-- Pavement Markings: 3 points + 19 lines (striping, symbols)
-- Signing: 18 points
-- Other: 62 points (roadway summary items)
-- Approaches: 7 points + 5 lines
+Features by category:
+- **Drainage:** 150 points + 11 lines (inlets, manholes, culverts, pipe runs)
+- **Signing:** 33 points (read from plan view drawings AND sign summary table)
+- **Pavement Markings:** 5 points + 21 lines (striping, symbols, crosswalks)
+- **Roadway Surface:** 16 lines (paving, aggregate base with station ranges)
+- **Approaches:** 7 points + 5 lines
+- **Erosion Control:** 4 features (silt fence, inlet protection)
+- **Other:** 17 points (miscellaneous roadway summary items)
 
-*Skipped items are project-wide pay items from the Roadway Summary that have quantities but no specific station — expected behavior.*
+The extraction prompts instruct Gemini to read the **plan view drawings** (not just summary tables), using station tick marks and offset estimation to locate features. This yields significantly more features than table-only extraction — signing improved from 18 to 33 features, drainage from 75 to 150.
+
+*Skipped items are traffic control devices and lump-sum pay items listed without station references.*
 
 ## Limitations and Disclaimer
 
