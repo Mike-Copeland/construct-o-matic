@@ -7,6 +7,7 @@ import math
 import re
 import sys
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pyproj import CRS, Transformer
 from typing import Optional, Tuple, List, Dict, Any
 import simplekml
@@ -33,154 +34,129 @@ CATEGORIES = {
     "other":            {"color": "#696969", "kml_color": "ff696969", "width": 2},
 }
 
-# --- Extraction Configurations (one per sheet type) ---
+# --- Extraction Configurations ---
+# Each config has 'match_keywords' for fuzzy matching against sheet titles from the inventory.
+# A config matches if ANY keyword appears (case-insensitive) in ANY sheet title.
+FEATURE_SCHEMA_BLOCK = (
+    'Return a JSON array where each object has EXACTLY these keys:\n'
+    '{"name":"<item code>","description":"<description>","category":"<category>",'
+    '"geometry_type":"<point or line>","start_station":"<e.g. 116+20>",'
+    '"end_station":"<end station or null>","offset":"<e.g. 35\' Lt.>",'
+    '"side":"<Lt or Rt or CL>","notes":"<additional info>"}\n'
+)
+
 EXTRACTION_CONFIGS = [
     {
-        "name": "Plan & Profile Features",
-        "sheet_types": ["Plan & Profile"],
+        "name": "Roadway Summary",
+        "match_keywords": ["roadway summary"],
         "prompt": (
-            "From the PLAN & PROFILE sheets of this civil engineering plan set, extract ALL roadside features "
-            "referenced to the mainline alignment stationing. Include curb & gutter, sidewalk, guardrail, "
-            "barrier, approaches (driveways), retaining walls, and any other constructed features shown.\n\n"
-            "CRITICAL RULES:\n"
-            "- For LINEAR features (curb & gutter, sidewalk, guardrail, barrier), you MUST provide BOTH "
-            "start_station AND end_station. These features run along the road.\n"
-            "- For POINT features (approaches/driveways, isolated structures), only provide start_station.\n"
-            "- Approaches/driveways are POINT features, not linear.\n\n"
-            "Return a JSON array where each object has EXACTLY these keys:\n"
-            '{\n'
-            '  "name": "<item code or label>",\n'
-            '  "description": "<type description, e.g. Curb & Gutter Type 3>",\n'
-            '  "category": "<one of: curb_gutter, sidewalk, guardrail, approach, other>",\n'
-            '  "geometry_type": "<point or line>",\n'
-            '  "start_station": "<e.g. 116+20>",\n'
-            '  "end_station": "<e.g. 119+00, or null for point features>",\n'
-            '  "offset": "<e.g. 35\' Lt. or 22\' Rt.>",\n'
-            '  "side": "<Lt or Rt or CL>",\n'
-            '  "notes": "<any additional info>"\n'
-            '}\n\n'
-            "Extract EVERY feature shown on the plan sheets. Do not skip any."
+            "From the ROADWAY SUMMARY sheets, extract ALL pay items with station ranges. "
+            "These tables list every construction item, its quantity, and where it applies.\n\n"
+            "Include: excavation, embankment, aggregate base, HMA paving, seeding, "
+            "removal items, fencing, guardrail, concrete items, and all other listed items.\n\n"
+            "For items with a station range (e.g. Sta 116+21 to 256+15), set geometry_type to 'line'.\n"
+            "For items at a single location, set geometry_type to 'point'.\n"
+            "Set category to the best fit: curb_gutter, sidewalk, guardrail, drainage, "
+            "pavement_marking, erosion_control, signing, approach, roadway_surface, or other.\n\n"
+            + FEATURE_SCHEMA_BLOCK +
+            "Extract EVERY line item. Do not skip any."
+        ),
+    },
+    {
+        "name": "Pipe & Culvert Summary",
+        "match_keywords": ["pipe", "culvert"],
+        "prompt": (
+            "From the PIPE CULVERT SUMMARY or PIPE SUMMARY sheets, extract ALL pipes and culverts.\n\n"
+            "Each pipe/culvert has a station, size, length, material, and type. "
+            "These are POINT features at their station location.\n\n"
+            "Set category to 'drainage' for all items.\n\n"
+            + FEATURE_SCHEMA_BLOCK +
+            "Include pipe size, material, and length in the notes field."
+        ),
+    },
+    {
+        "name": "Plan & Profile Features",
+        "match_keywords": ["plan & profile", "plan sheet", "plan/profile", "plan/ profile"],
+        "prompt": (
+            "From the PLAN & PROFILE sheets, extract ALL roadside features "
+            "referenced to mainline alignment stationing. Include curb & gutter, sidewalk, guardrail, "
+            "barrier, approaches (driveways), retaining walls, and any other constructed features.\n\n"
+            "CRITICAL: For LINEAR features (curb & gutter, sidewalk, guardrail, barrier), "
+            "provide BOTH start_station AND end_station.\n"
+            "Approaches/driveways are POINT features.\n"
+            "Set category to: curb_gutter, sidewalk, guardrail, approach, or other.\n\n"
+            + FEATURE_SCHEMA_BLOCK +
+            "Extract EVERY feature shown. Do not skip any."
         ),
     },
     {
         "name": "Drainage Features",
-        "sheet_types": ["Drainage"],
+        "match_keywords": ["drainage"],
         "prompt": (
-            "From the DRAINAGE plan sheets of this plan set, extract ALL drainage structures and features "
-            "referenced to the mainline alignment stationing.\n\n"
-            "Include: inlets (all types), manholes, catch basins, pipe runs between structures, "
-            "detention/retention ponds, swales, ditches, culverts, headwalls, and outfalls.\n\n"
-            "CRITICAL RULES:\n"
-            "- Individual structures (inlets, manholes, catch basins) are POINT features.\n"
-            "- Pipe runs between structures are LINE features with start and end stations.\n"
-            "- Swales and ditches are LINE features with start and end stations.\n"
-            "- Ponds are POINT features located at their center.\n\n"
-            "Return a JSON array where each object has EXACTLY these keys:\n"
-            '{\n'
-            '  "name": "<item code, e.g. 605-606A>",\n'
-            '  "description": "<e.g. Inlet Type 1A>",\n'
-            '  "category": "drainage",\n'
-            '  "geometry_type": "<point or line>",\n'
-            '  "start_station": "<e.g. 117+38>",\n'
-            '  "end_station": "<null for structures, or end station for pipes/swales>",\n'
-            '  "offset": "<e.g. 31\' Lt.>",\n'
-            '  "side": "<Lt or Rt or CL>",\n'
-            '  "notes": "<pipe size, material, connected structures, etc.>"\n'
-            '}'
+            "From the DRAINAGE plan sheets, extract ALL drainage structures and features.\n\n"
+            "Include: inlets, manholes, catch basins, pipe runs, ponds, swales, ditches, culverts, headwalls.\n"
+            "Structures (inlets, manholes) = POINT. Pipe runs/swales/ditches = LINE with start/end station.\n"
+            "Set category to 'drainage'.\n\n"
+            + FEATURE_SCHEMA_BLOCK +
+            "Include pipe size, material, and connected structures in notes."
         ),
     },
     {
         "name": "Signing Features",
-        "sheet_types": ["Signing", "Sign Summary"],
+        "match_keywords": ["sign"],
         "prompt": (
-            "From the SIGNING sheets and Sign Summary table of this plan set, extract ALL signs "
-            "referenced to the mainline alignment stationing.\n\n"
-            "Each sign is a POINT feature. Include sign type, MUTCD code if shown, and facing direction.\n\n"
-            "Return a JSON array where each object has EXACTLY these keys:\n"
-            '{\n'
-            '  "name": "<sign code, e.g. R1-1 or W3-1>",\n'
-            '  "description": "<sign description, e.g. STOP Sign, Speed Limit 45>",\n'
-            '  "category": "signing",\n'
-            '  "geometry_type": "point",\n'
-            '  "start_station": "<e.g. 120+13>",\n'
-            '  "end_station": null,\n'
-            '  "offset": "<e.g. 12\' Rt.>",\n'
-            '  "side": "<Lt or Rt>",\n'
-            '  "notes": "<facing direction, mounting type, new/existing/remove>"\n'
-            '}'
+            "From the SIGNING sheets, Sign Summary table, and Sign & Pavement Marking Plan sheets, "
+            "extract ALL signs referenced to mainline alignment stationing.\n\n"
+            "Each sign is a POINT feature. Include MUTCD code if shown.\n"
+            "Set category to 'signing'.\n\n"
+            + FEATURE_SCHEMA_BLOCK +
+            "Include facing direction, mounting type, new/existing/remove in notes."
         ),
     },
     {
         "name": "Pavement Marking Features",
-        "sheet_types": ["Pavement Marking", "Striping"],
+        "match_keywords": ["pavement mark", "striping", "marking plan"],
         "prompt": (
-            "From the PAVEMENT MARKING / STRIPING sheets of this plan set, extract ALL pavement markings "
-            "referenced to the mainline alignment stationing.\n\n"
-            "CRITICAL RULES:\n"
-            "- Striping lines (center line, edge line, lane line, skip line) are LINE features.\n"
-            "- Symbols (turn arrows, ONLY markings, crosswalk bars, stop bars, RR markings) are POINT features.\n"
-            "- For each striping line, provide the start and end station.\n\n"
-            "Return a JSON array where each object has EXACTLY these keys:\n"
-            '{\n'
-            '  "name": "<marking type code>",\n'
-            '  "description": "<e.g. 4-inch White Solid Edge Line, Yellow Double Center Line>",\n'
-            '  "category": "pavement_marking",\n'
-            '  "geometry_type": "<point or line>",\n'
-            '  "start_station": "<e.g. 116+83>",\n'
-            '  "end_station": "<end station for lines, null for symbols>",\n'
-            '  "offset": "<e.g. 12\' Lt. or 0\' CL>",\n'
-            '  "side": "<Lt or Rt or CL>",\n'
-            '  "notes": "<color, width, pattern (solid/skip/broken), reflectivity>"\n'
-            '}'
+            "From the PAVEMENT MARKING / STRIPING sheets, extract ALL pavement markings.\n\n"
+            "Striping lines (center line, edge line, lane line) = LINE with start/end station.\n"
+            "Symbols (arrows, crosswalks, stop bars) = POINT.\n"
+            "Set category to 'pavement_marking'.\n\n"
+            + FEATURE_SCHEMA_BLOCK +
+            "Include color, width, pattern (solid/skip/broken) in notes."
         ),
     },
     {
         "name": "Erosion Control Features",
-        "sheet_types": ["Erosion Control", "SWPPP"],
+        "match_keywords": ["erosion", "swppp"],
         "prompt": (
-            "From the EROSION CONTROL / SWPPP sheets of this plan set, extract ALL erosion control features "
-            "referenced to the mainline alignment stationing.\n\n"
-            "Include: silt fence, inlet protection, erosion blanket, seeding, wattles, check dams, "
-            "sediment traps, construction entrances.\n\n"
-            "CRITICAL RULES:\n"
-            "- Silt fence, wattles, and erosion blanket are LINE features with start/end stations.\n"
-            "- Inlet protection, check dams, and sediment traps are POINT features.\n"
-            "- Construction entrances are POINT features.\n\n"
-            "Return a JSON array where each object has EXACTLY these keys:\n"
-            '{\n'
-            '  "name": "<item code>",\n'
-            '  "description": "<e.g. Silt Fence Type 1>",\n'
-            '  "category": "erosion_control",\n'
-            '  "geometry_type": "<point or line>",\n'
-            '  "start_station": "<e.g. 120+00>",\n'
-            '  "end_station": "<end station for linear features, null for points>",\n'
-            '  "offset": "<e.g. 45\' Lt.>",\n'
-            '  "side": "<Lt or Rt or CL>",\n'
-            '  "notes": "<any additional info>"\n'
-            '}'
+            "From the EROSION CONTROL / SWPPP sheets, extract ALL erosion control features.\n\n"
+            "Silt fence, wattles, erosion blanket = LINE with start/end station.\n"
+            "Inlet protection, check dams, sediment traps, construction entrances = POINT.\n"
+            "Set category to 'erosion_control'.\n\n"
+            + FEATURE_SCHEMA_BLOCK
         ),
     },
     {
         "name": "Traffic Control Features",
-        "sheet_types": ["Traffic Control"],
+        "match_keywords": ["traffic control", "traffic plan"],
         "prompt": (
-            "From the TRAFFIC CONTROL sheets of this plan set, extract ALL temporary traffic control features "
-            "referenced to the mainline alignment stationing.\n\n"
-            "Include: temporary signs, barricades, flagging stations, temporary striping, "
-            "detour markings, channelizing devices, arrow boards.\n\n"
-            "All traffic control features are typically POINT features unless they define a zone.\n\n"
-            "Return a JSON array where each object has EXACTLY these keys:\n"
-            '{\n'
-            '  "name": "<item code or device type>",\n'
-            '  "description": "<description>",\n'
-            '  "category": "traffic_control",\n'
-            '  "geometry_type": "<point or line>",\n'
-            '  "start_station": "<e.g. 116+00>",\n'
-            '  "end_station": "<end station if zone, null for point features>",\n'
-            '  "offset": "<e.g. 6\' Rt.>",\n'
-            '  "side": "<Lt or Rt or CL>",\n'
-            '  "notes": "<phase, condition, etc.>"\n'
-            '}'
+            "From the TRAFFIC CONTROL / TRAFFIC PLAN sheets, extract ALL temporary traffic control features.\n\n"
+            "Include: temporary signs, barricades, flagging stations, temporary striping, arrow boards.\n"
+            "Most are POINT features unless they define a zone (LINE).\n"
+            "Set category to 'traffic_control'.\n\n"
+            + FEATURE_SCHEMA_BLOCK
+        ),
+    },
+    {
+        "name": "Utility Features",
+        "match_keywords": ["utility"],
+        "prompt": (
+            "From the UTILITY PLANS sheets, extract ALL utility features referenced to mainline stationing.\n\n"
+            "Include: utility relocations, crossings, poles, vaults, manholes, conduit runs.\n"
+            "Individual structures = POINT. Conduit/pipe runs = LINE with start/end station.\n"
+            "Set category to 'utility'.\n\n"
+            + FEATURE_SCHEMA_BLOCK +
+            "Include utility owner/type (electric, gas, water, telecom) in notes."
         ),
     },
 ]
@@ -614,42 +590,76 @@ def phase4_inventory_sheets(pdf_path: str) -> List[Dict]:
     except WorkflowError:
         pass
     print("  > Could not classify sheets. Will attempt all extraction types.")
-    return [{"sheet_type": st, "sheet_numbers": []} for st in
-            ["Plan & Profile", "Drainage", "Signing", "Pavement Marking", "Erosion Control", "Traffic Control"]]
+    return [{"sheet_type": st, "title": st, "sheet_numbers": []} for st in
+            ["Plan & Profile", "Roadway Summary", "Pipe Summary", "Drainage",
+             "Signing", "Pavement Marking", "Erosion Control", "Traffic Control", "Utility"]]
 
-# --- Phase 5: Category-Specific Feature Extraction ---
+# --- Phase 5: Category-Specific Feature Extraction (Parallel) ---
+
+def _config_matches_inventory(config: dict, sheet_inventory: List[Dict]) -> bool:
+    """Check if any keyword in the config matches any sheet title in the inventory (case-insensitive)."""
+    all_titles = ' '.join(
+        s.get('sheet_type', '') + ' ' + s.get('title', '') + ' ' + s.get('description', '')
+        for s in sheet_inventory
+    ).lower()
+    return any(kw.lower() in all_titles for kw in config['match_keywords'])
+
+def _extract_one_config(pdf_path: str, config: dict) -> Tuple[str, List[Dict]]:
+    """Extract features for a single config. Returns (config_name, features_list)."""
+    try:
+        features = call_gemini_api(pdf_path, config['prompt'], is_json=True)
+        if isinstance(features, list):
+            for f in features:
+                f['_extraction_source'] = config['name']
+            return (config['name'], features)
+        elif isinstance(features, dict) and 'features' in features:
+            feature_list = features['features']
+            for f in feature_list:
+                f['_extraction_source'] = config['name']
+            return (config['name'], feature_list)
+        elif isinstance(features, dict) and isinstance(features.get('items'), list):
+            feature_list = features['items']
+            for f in feature_list:
+                f['_extraction_source'] = config['name']
+            return (config['name'], feature_list)
+        else:
+            return (config['name'], [])
+    except WorkflowError as e:
+        print(f"    ERROR extracting {config['name']}: {e}")
+        return (config['name'], [])
 
 def phase5_extract_all_features(pdf_path: str, sheet_inventory: List[Dict]) -> List[Dict]:
-    print("\n--- Phase 5: Extracting Features by Category ---")
-    available_sheet_types = {s['sheet_type'] for s in sheet_inventory}
-    all_features = []
+    print("\n--- Phase 5: Extracting Features by Category (Parallel) ---")
 
+    # Determine which configs to run based on fuzzy keyword matching
+    configs_to_run = []
     for config in EXTRACTION_CONFIGS:
-        # Check if any of the config's sheet types exist in the plan set
-        matching = [st for st in config['sheet_types'] if st in available_sheet_types]
-        if not matching:
+        if _config_matches_inventory(config, sheet_inventory):
+            configs_to_run.append(config)
+            print(f"  > Queued: {config['name']}")
+        else:
             print(f"  > Skipping '{config['name']}': no matching sheets found.")
-            continue
 
-        print(f"\n  > Extracting: {config['name']}...")
-        try:
-            features = call_gemini_api(pdf_path, config['prompt'], is_json=True)
-            if isinstance(features, list):
-                for f in features:
-                    f['_extraction_source'] = config['name']
+    if not configs_to_run:
+        print("  > WARNING: No extraction configs matched. Running all as fallback.")
+        configs_to_run = EXTRACTION_CONFIGS
+
+    # Run all extractions in parallel
+    all_features = []
+    print(f"\n  > Launching {len(configs_to_run)} parallel extraction(s)...")
+    with ThreadPoolExecutor(max_workers=len(configs_to_run)) as executor:
+        futures = {
+            executor.submit(_extract_one_config, pdf_path, config): config['name']
+            for config in configs_to_run
+        }
+        for future in as_completed(futures):
+            config_name = futures[future]
+            try:
+                name, features = future.result()
                 all_features.extend(features)
-                print(f"    Found {len(features)} features.")
-            elif isinstance(features, dict) and 'features' in features:
-                # Handle case where Gemini wraps in a FeatureCollection
-                feature_list = features['features']
-                for f in feature_list:
-                    f['_extraction_source'] = config['name']
-                all_features.extend(feature_list)
-                print(f"    Found {len(feature_list)} features (unwrapped from object).")
-            else:
-                print(f"    WARNING: Unexpected response type: {type(features).__name__}")
-        except WorkflowError as e:
-            print(f"    ERROR extracting {config['name']}: {e}")
+                print(f"    {name}: {len(features)} features")
+            except Exception as e:
+                print(f"    {config_name}: FAILED - {e}")
 
     print(f"\n  > Total raw features extracted across all categories: {len(all_features)}")
     return all_features
@@ -965,14 +975,16 @@ def main():
             print("  > Aborting workflow based on user input.")
             sys.exit(1)
 
-        # Phase 2: Typical Section
-        typical_sections = phase2_extract_typical_section(pdf_path)
+        # Phase 2 + Phase 4: Run in parallel (independent of each other)
+        print("\n  > Running Phase 2 (Typical Section) and Phase 4 (Sheet Inventory) in parallel...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_typical = executor.submit(phase2_extract_typical_section, pdf_path)
+            future_inventory = executor.submit(phase4_inventory_sheets, pdf_path)
+            typical_sections = future_typical.result()
+            sheet_inventory = future_inventory.result()
 
-        # Phase 3: Centerline
+        # Phase 3: Centerline (depends on Phase 1 metadata)
         centerline_geojson, sorted_centerline = phase3_generate_centerline(pdf_path, project_metadata)
-
-        # Phase 4: Sheet Inventory
-        sheet_inventory = phase4_inventory_sheets(pdf_path)
 
         # Phase 5: Category-Specific Feature Extraction
         raw_features = phase5_extract_all_features(pdf_path, sheet_inventory)
